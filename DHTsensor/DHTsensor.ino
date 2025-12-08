@@ -10,17 +10,20 @@
 #define LCD_ADDR 0x27         // I2C-adres van het LCD-scherm
 #define LCD_COLS 16           // Aantal kolommen van het LCD
 #define LCD_ROWS 2            // Aantal rijen van het LCD
-#define LED_PIN 4             // LED voor meetactiviteit
-#define BUTTON_PIN 5          // Drukknop voor menu
+#define LED_PIN 12             // LED voor meetactiviteit
+#define BUTTON_PIN 33          // Drukknop voor menu
 
 // Instellingen voor meetinterval
-unsigned long measureIntervalMs = 60000;     // standaard 1 minuut
-unsigned long lastMeasureTime   = 0;         // tijdstip laatste meting
+unsigned long measureIntervalMs = 1000;   // standaard 1 seconde
+unsigned long lastMeasureTime   = 0;      // tijdstip laatste meting
 
 // Menu-instellingen
-bool inMenu = false;                         // status: zit gebruiker in menu?
-unsigned long menuStartTime = 0;             // tijdstip van laatste menu-activiteit
-const unsigned long menuTimeout = 5000;      // menu verdwijnt na 5 seconden inactiviteit
+bool inMenu = false;
+unsigned long menuStartTime = 0;
+const unsigned long menuTimeout = 5000;
+
+// Extra vlag: menu pas actief NA eerste druk
+bool buttonEnabled = false;
 
 // Sensor- en displayobjecten
 DHT dht(DHTPIN, DHTTYPE);
@@ -42,6 +45,19 @@ TaskHandle_t TaskButtonHandle = NULL;
 // ======================
 void TaskDHT(void *pvParameters) {
   (void) pvParameters;
+
+  // Eerste meting direct bij start
+  digitalWrite(LED_PIN, HIGH);
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+  digitalWrite(LED_PIN, LOW);
+
+  if (!isnan(h) && !isnan(t)) {
+    g_hum  = h;
+    g_temp = t;
+  }
+  lastMeasureTime = millis();  // start referentie na eerste meting
+
   for (;;) {
     unsigned long now = millis();
 
@@ -49,18 +65,17 @@ void TaskDHT(void *pvParameters) {
     if (now - lastMeasureTime >= measureIntervalMs) {
       lastMeasureTime = now;
 
-      digitalWrite(LED_PIN, HIGH);      // LED aan tijdens meting
-      float h = dht.readHumidity();     // Lees luchtvochtigheid
-      float t = dht.readTemperature();  // Lees temperatuur
-      digitalWrite(LED_PIN, LOW);       // LED weer uit
+      digitalWrite(LED_PIN, HIGH);
+      float h2 = dht.readHumidity();
+      float t2 = dht.readTemperature();
+      digitalWrite(LED_PIN, LOW);
 
-      // Sla meting alleen op als waarden geldig zijn
-      if (!isnan(h) && !isnan(t)) {
-        g_hum  = h;
-        g_temp = t;
+      if (!isnan(h2) && !isnan(t2)) {
+        g_hum  = h2;
+        g_temp = t2;
       }
     }
-    vTaskDelay(100 / portTICK_PERIOD_MS); // even wachten
+    vTaskDelay(100 / portTICK_PERIOD_MS);
   }
 }
 
@@ -75,10 +90,10 @@ void TaskLCD(void *pvParameters) {
     // Toon ander scherm als gebruiker in menu zit
     if (inMenu) {
       lcd.setCursor(0, 0);
-      lcd.print("Minuten meten:");
+      lcd.print("Seconden meten:");
       lcd.setCursor(0, 1);
-      lcd.print(measureIntervalMs / 60000); // toon aantal minuten
-    } 
+      lcd.print(measureIntervalMs / 1000); // toon aantal seconden
+    }
     // Anders toon temperatuur en vochtigheid
     else if (!isnan(g_temp) && !isnan(g_hum)) {
       lcd.setCursor(0, 0);
@@ -120,8 +135,8 @@ void TaskLCD(void *pvParameters) {
 void TaskRelaisLamp(void *pvParameters) {
   (void) pvParameters;
 
-  const float TEMP_ON  = 25.0;  // onder 25°C: lamp aan
-  const float TEMP_OFF = 30.0;  // boven 30°C: lamp uit
+  const float TEMP_ON  = 20.0;  // onder 25°C: lamp aan
+  const float TEMP_OFF = 23.0;  // boven 30°C: lamp uit
 
   bool relayState = false;
   digitalWrite(RELAISPIN1, HIGH); // relais start in uit-stand (active LOW)
@@ -157,8 +172,8 @@ void TaskRelaisLamp(void *pvParameters) {
 void TaskRelaisFan(void *pvParameters){
   (void) pvParameters;
 
-  const float HUM_ON = 85.0;  // boven 85%: ventilator aan
-  const float HUM_OFF = 60.0; // onder 60%: ventilator uit
+  const float HUM_ON = 92.0;  // boven 85%: ventilator aan
+  const float HUM_OFF = 88.0; // onder 60%: ventilator uit
 
   bool relayState = false;
   digitalWrite(RELAISPIN2, HIGH); // relais start uit
@@ -199,17 +214,24 @@ void TaskButton(void *pvParameters) {
 
     // Detecteer druk (van HIGH naar LOW)
     if (state == LOW && lastState == HIGH) {
-      if (!inMenu) {
-        // Menu ingaan
-        inMenu = true;
-        menuStartTime = millis();
+
+      // Eerste keer: alleen buttonEnabled aanzetten, nog geen menu-logica
+      if (!buttonEnabled) {
+        buttonEnabled = true;
       } else {
-        // Menu actief: interval verhogen (1–10 minuten)
-        unsigned long minutes = measureIntervalMs / 60000;
-        minutes++;
-        if (minutes > 10) minutes = 1;
-        measureIntervalMs = minutes * 60000;
-        menuStartTime = millis(); // reset timeout
+        // Vanaf nu: normale menu-bediening
+        if (!inMenu) {
+          // Menu ingaan
+          inMenu = true;
+          menuStartTime = millis();
+        } else {
+          // Menu actief: interval verhogen (1–10 seconden)
+          unsigned long seconds = measureIntervalMs / 1000;
+          seconds++;
+          if (seconds > 10) seconds = 1;
+          measureIntervalMs = seconds * 1000;
+          menuStartTime = millis(); // reset timeout
+        }
       }
     }
     lastState = state;
@@ -219,7 +241,7 @@ void TaskButton(void *pvParameters) {
       inMenu = false;
     }
 
-    vTaskDelay(50 / portTICK_PERIOD_MS);  // debounce vertraging
+    vTaskDelay(50 / portTICK_PERIOD_MS);
   }
 }
 
