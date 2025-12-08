@@ -12,6 +12,16 @@
 #define LCD_COLS 16
 #define LCD_ROWS 2
 
+#define LED_PIN      4
+#define BUTTON_PIN   5      
+
+unsigned long measureIntervalMs = 60000;
+unsigned long lastMeasureTime   = 0;
+
+bool inMenu            = false;
+unsigned long menuStartTime    = 0;
+const unsigned long menuTimeout = 5000;
+
 DHT dht(DHTPIN, DHTTYPE);
 LiquidCrystal_I2C lcd(LCD_ADDR, LCD_COLS, LCD_ROWS);
 
@@ -22,19 +32,27 @@ TaskHandle_t TaskDHTHandle = NULL;
 TaskHandle_t TaskLCDHandle = NULL;
 TaskHandle_t TaskRelaisLampHandle = NULL;
 TaskHandle_t TaskRelaisFanHandle = NULL;
+TaskHandle_t TaskButtonHandle = NULL;
 
 void TaskDHT(void *pvParameters) {
   (void) pvParameters;
   for (;;) {
-    float h = dht.readHumidity();
-    float t = dht.readTemperature();
+    unsigned long now = millis();
 
-    if (!isnan(h) && !isnan(t)) {
-      g_hum  = h;
-      g_temp = t;
+    if (now - lastMeasureTime >= measureIntervalMs) {
+      lastMeasureTime = now;
+
+      digitalWrite(LED_PIN, HIGH);
+      float h = dht.readHumidity();
+      float t = dht.readTemperature();
+      digitalWrite(LED_PIN, LOW);
+
+      if (!isnan(h) && !isnan(t)) {
+        g_hum  = h;
+        g_temp = t;
+      }
     }
-
-    vTaskDelay(2500 / portTICK_PERIOD_MS);  // ~2,5 s
+    vTaskDelay(100 / portTICK_PERIOD_MS);
   }
 }
 
@@ -42,7 +60,13 @@ void TaskLCD(void *pvParameters) {
   (void) pvParameters;
   for (;;) {
     lcd.clear();
-    if (!isnan(g_temp) && !isnan(g_hum)) {
+
+    if (inMenu) {
+      lcd.setCursor(0, 0);
+      lcd.print("Minuten meten:");
+      lcd.setCursor(0, 1);
+      lcd.print(measureIntervalMs / 60000);   // aantal minuten
+    } else if (!isnan(g_temp) && !isnan(g_hum)) {
       lcd.setCursor(0, 0);
       lcd.print("T:");
       lcd.print(g_temp, 1);
@@ -54,7 +78,7 @@ void TaskLCD(void *pvParameters) {
       lcd.print(g_hum, 1);
       lcd.print("%");
 
-      if(g_hum < 50) {
+      if (g_hum < 50) {
         lcd.setCursor(0, 1);
         lcd.print("Te laag. Sproei!");
       } else if (g_hum > 90) {
@@ -68,7 +92,8 @@ void TaskLCD(void *pvParameters) {
       lcd.setCursor(0, 0);
       lcd.print("Wachten op data");
     }
-    vTaskDelay(1000 / portTICK_PERIOD_MS);  // LCD elke seconde verversen
+
+    vTaskDelay(500 / portTICK_PERIOD_MS);
   }
 }
 
@@ -135,6 +160,37 @@ void TaskRelaisFan(void *pvParameters){
   }
 }
 
+void TaskButton(void *pvParameters) {
+  (void) pvParameters;
+  bool lastState = HIGH;
+
+  for (;;) {
+    bool state = digitalRead(BUTTON_PIN);
+
+    if (state == LOW && lastState == HIGH) {         // falling edge
+      // knop ingedrukt
+      if (!inMenu) {
+        inMenu = true;
+        menuStartTime = millis();
+      } else {
+        // in menu: interval verhogen in stappen van 1 min (1–10 min voorbeeld)
+        unsigned long minutes = measureIntervalMs / 60000;
+        minutes++;
+        if (minutes > 10) minutes = 1;
+        measureIntervalMs = minutes * 60000;
+        menuStartTime = millis();     // timeout resetten
+      }
+    }
+    lastState = state;
+
+    // menu-timeout
+    if (inMenu && (millis() - menuStartTime > menuTimeout)) {
+      inMenu = false;
+    }
+
+    vTaskDelay(50 / portTICK_PERIOD_MS);  // debounce
+  }
+}
 
 void setup() {
   Serial.begin(115200);
@@ -154,6 +210,12 @@ void setup() {
 
   pinMode(RELAISPIN2, OUTPUT);
   digitalWrite(RELAISPIN2, LOW);
+
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
 
   xTaskCreate(
     TaskDHT,          
@@ -189,7 +251,17 @@ void setup() {
     NULL,
     1,
     &TaskRelaisFanHandle
-    );
+  );
+
+    xTaskCreate(
+    TaskButton,
+    "TaskButton",
+    2048,
+    NULL,
+    1,
+    &TaskButtonHandle
+  );
+
 }
 
 void loop() {
